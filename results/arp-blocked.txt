@@ -1,0 +1,9 @@
+elapsed_ms=1.434 event=runtime libcurl=7.81.0 asynch_dns=yes c_ares=none timeout_s=20 connect_timeout_s=10 dns_cache_s=180 nosignal=1
+elapsed_ms=1.907 event=perform_begin attempt=1
+elapsed_ms=1001.887 event=release_requested
+elapsed_ms=1002.011 event=join_begin
+elapsed_ms=1014.927 event=progress_abort reason=release_flag
+elapsed_ms=6145.262 event=perform_return attempt=1 curl_code=42 http=0 wall_ms=6143.305070 namelookup_s=0.000000 connect_s=0.000000 curl_total_s=1.012627
+elapsed_ms=6145.323 event=cleanup_begin
+elapsed_ms=6145.369 event=worker_exit
+elapsed_ms=6145.507 event=join_end wait_ms=5143.480349

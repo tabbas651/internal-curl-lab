@@ -1,0 +1,7 @@
+services:
+  client:
+    build: .
+    image: aamp-dns-lab:local
+    cap_add: [NET_ADMIN, NET_RAW]
+    volumes:
+      - ./results:/results

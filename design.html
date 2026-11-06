@@ -1,0 +1,425 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>curl_probe.cpp - Application Walkthrough</title>
+<style>
+:root { color-scheme:light; --ink:#182d29; --muted:#526760;
+  --green:#176b53; --blue:#215e98; --line:#ccd9d3; --warn:#943c28;
+  font-family:"Segoe UI",sans-serif; color:var(--ink); background:#f2f6f3; }
+* { box-sizing:border-box; }
+body { margin:0; background-image:radial-gradient(#ccd9d3 0.6px,transparent 0.6px);
+  background-size:22px 22px; }
+main { max-width:1180px; margin:auto; padding:38px 24px 60px; }
+h1,h2 { font-family:Georgia,serif; font-weight:normal; }
+h1 { font-size:36px; margin:8px 0 14px; }
+h2 { font-size:26px; margin:0 0 16px; }
+h3 { font-size:18px; margin:0 0 10px; }
+p,li { line-height:1.65; } p { margin:8px 0; }
+.label { font-size:12px; font-weight:bold; color:var(--green); text-transform:uppercase; }
+.intro { max-width:850px; color:var(--muted); }
+nav { display:flex; flex-wrap:wrap; gap:14px; margin:24px 0; }
+a { color:var(--blue); text-underline-offset:3px; }
+section { margin-top:32px; padding-top:22px; border-top:1px solid var(--line); }
+code,pre { font-family:Consolas,"Liberation Mono",monospace; font-size:13px; }
+code { color:#194c3b; overflow-wrap:anywhere; }
+pre { padding:16px; background:#e7eee9; border-left:3px solid var(--green);
+  line-height:1.6; white-space:pre-wrap; overflow-wrap:anywhere; }
+.notice { padding:14px 18px; border-left:4px solid var(--blue);
+  background:#e7f0fa; margin:18px 0; }
+.warning { border-color:var(--warn); background:#f9ece6; }
+.lanes { display:grid; grid-template-columns:1fr 1fr; gap:22px; }
+.lane { padding:18px; border:1px solid var(--line); border-top:4px solid var(--green);
+  border-radius:4px; background:white; min-width:0; }
+.lane.worker { border-top-color:var(--blue); }
+.lane ol { padding-left:22px; margin-bottom:0; }
+.lane li { padding-bottom:12px; }
+.table-wrap { overflow-x:auto; background:white; border:1px solid var(--line); }
+table { width:100%; border-collapse:collapse; font-size:14px; }
+th,td { padding:13px; text-align:left; vertical-align:top; border-bottom:1px solid var(--line); }
+th { background:#e7eee9; } td p { margin:0; }
+.argument-table { min-width:730px; }
+.argument-table td:first-child { width:20%; }
+.argument-table td:nth-child(2) { width:18%; }
+.steps { padding-left:24px; }
+.steps li { margin-bottom:14px; }
+footer { margin-top:32px; color:var(--muted); font-size:13px; }
+@media(max-width:720px) { main { padding:24px 14px; } h1 { font-size:29px; }
+  .lanes { grid-template-columns:1fr; } th,td { padding:10px; } }
+@media print { body { background:white; } main { max-width:none; }
+  nav { display:none; } .table-wrap { overflow:visible; }
+  .argument-table { min-width:0; } tr,.lane { break-inside:avoid; } }
+</style>
+</head>
+<body>
+<main>
+<header>
+<div class="label">Standalone application / source walkthrough</div>
+<h1>What curl_probe.cpp does</h1>
+<p class="intro">A small application that configures libcurl similarly to AAMP's
+manifest downloader, runs the request in a separate thread, and measures how
+long curl and the caller's join take. It does not run AAMP or play video.</p>
+<nav aria-label="Walkthrough sections">
+<a href="#run">Run it</a><a href="#arguments">All arguments</a>
+<a href="#threads">Threads</a><a href="#functions">Functions and state</a>
+<a href="#curl">Curl options</a><a href="#retry">Retries</a>
+<a href="#logs">Logs and timings</a><a href="#resolver">Resolver timing</a>
+<a href="#limits">Limits</a>
+</nav>
+<div class="notice">Current design: <strong>one client container</strong>, a
+URL supplied by you, and the container's configured DNS/network. No gateway
+container, manifest.test server, automatic ARP block or DNS block is required.</div>
+</header>
+
+<section id="run">
+<h2>1. Start and run</h2>
+<p><strong>Host terminal:</strong> start once and enter the client shell.</p>
+<pre>cd dns-curl-lab
+docker compose up -d --build --remove-orphans
+docker compose exec client sh</pre>
+<p><strong>Client container shell:</strong> use an approved reachable endpoint.
+This public example is not the original incident's manifest.</p>
+<pre>curl-probe --url https://example.com/ --verify-peer
+echo "probe_exit=$?"
+
+curl-probe --url https://example.com/ --verify-peer --stop-after-ms 1000
+echo "probe_exit=$?"</pre>
+<p>The first command waits for natural completion. The second requests stop
+after approximately one second if the worker has not finished. No default URL
+is compiled into the application. To test Google explicitly, use
+<code>--url https://www.google.com/</code>.</p>
+<p>The executable is <code>/usr/local/bin/curl-probe</code>; any working
+directory inside the client shell is fine. This performs an HTTP GET, not ping.</p>
+</section>
+
+<section id="arguments">
+<h2>2. Every command-line argument</h2>
+<p>Options are parsed by <code>arguments()</code>. All options except
+<code>--help</code>, <code>--verify-peer</code> and <code>--verbose</code>
+require a following value. Quote URLs or header values containing shell
+characters or spaces. Repeated headers accumulate; other repeated value options
+use the last value. Unknown options, missing values and invalid numbers exit 2.</p>
+<div class="table-wrap">
+<table class="argument-table">
+<thead><tr><th>Argument</th><th>Default / accepted range</th><th>What it changes and example</th></tr></thead>
+<tbody>
+<tr><td><code>--url URL</code></td><td>Required; nonempty</td><td>Sets
+<code>Config::url</code> and <code>CURLOPT_URL</code>. Hostname lookup is done
+by libcurl, not by application code. Example: <code>--url https://example.com/</code>.
+The parser does not validate the URL format; curl reports URL errors.</td></tr>
+<tr><td><code>--timeout SEC</code></td><td>20 seconds; 0-3600</td><td>Sets
+<code>CURLOPT_TIMEOUT</code>, the total transfer timeout per curl attempt.
+Zero disables that timeout. Retries can increase overall application duration;
+resolver cleanup can also delay return. Example: <code>--timeout 20</code>.</td></tr>
+<tr><td><code>--connect-timeout SEC</code></td><td>10 seconds; 0-3600</td><td>Sets
+<code>CURLOPT_CONNECTTIMEOUT</code> for the connection phase, including name
+resolution and connection/protocol establishment. It is not TCP-only.
+Zero selects libcurl's default connection timeout, not an unlimited timeout.
+Example: <code>--connect-timeout 10</code>.</td></tr>
+<tr><td><code>--dns-cache SEC</code></td><td>180 seconds; 0-86400</td><td>Sets
+<code>CURLOPT_DNS_CACHE_TIMEOUT</code>, how long libcurl caches lookup results.
+Zero disables this cache. Does not set DNS query timeout or edit resolv.conf.
+Fresh application runs do not share this easy-handle cache.
+Example: <code>--dns-cache 180</code>.</td></tr>
+<tr><td><code>--stop-after-ms MS</code></td><td>Omitted: -1 internally; explicit 0-3600000</td><td>
+The caller waits for worker completion for this many milliseconds, then clears
+the active flag if still running. Measured from the caller's wait after thread
+creation, not DNS entry or perform_begin. Zero requests cancellation immediately
+if the worker is not already done. Not a hard kill or join deadline.
+Example: <code>--stop-after-ms 1000</code>.</td></tr>
+<tr><td><code>--start-timeout SEC</code></td><td>0 (disabled); 0-3600</td><td>
+Application progress callback aborts if no response body bytes have arrived by
+this elapsed time in an attempt. Header arrival alone does not satisfy it.
+Only checked when curl invokes the callback; not an independent timer thread.
+Example: <code>--start-timeout 5</code>.</td></tr>
+<tr><td><code>--stall-timeout SEC</code></td><td>10 seconds; 0-3600</td><td>
+After at least one body byte, progress callback aborts if no body update has
+occurred for this interval. Zero disables it. It does not apply before the first
+body byte. Example: <code>--stall-timeout 10</code>.</td></tr>
+<tr><td><code>--retries N</code></td><td>1; 0-100</td><td>Retry budget for curl
+timeout/connect/send failures and selected HTTP errors. One means at most two
+attempts for these errors. Zero disables ordinary retries, but HTTP 408 still
+has a forced minimum retry and HTTP 502 uses its separate budget.
+Example: <code>--retries 0</code>.</td></tr>
+<tr><td><code>--retry-502 N</code></td><td>10; 0-100</td><td>Separate retry
+budget when HTTP status is 502. Ten allows up to eleven attempts; retry delay
+is one second. Example: <code>--retry-502 0</code>.</td></tr>
+<tr><td><code>--user-agent TEXT</code></td><td><code>AAMP-DNS-Lab/1.0</code></td><td>
+Sets <code>CURLOPT_USERAGENT</code>. The default is a lab placeholder, not the
+device's actual browser/player identity.
+Example: <code>--user-agent "MyTestAgent/1.0"</code>.</td></tr>
+<tr><td><code>--header TEXT</code></td><td>No custom headers</td><td>Adds a
+header to the curl list via <code>CURLOPT_HTTPHEADER</code>. Repeat for several
+headers. Example: <code>--header "Accept: application/dash+xml"</code>.
+Verbose traces can expose these values; never share production tokens.</td></tr>
+<tr><td><code>--proxy URL</code></td><td>Empty string: no proxy</td><td>Sets
+<code>CURLOPT_PROXY</code>. Empty explicitly disables environment proxies.
+Using a proxy can change where DNS occurs, so keep it constant in comparisons.
+Example: <code>--proxy http://proxy.example:8080</code>. This example is a
+placeholder and must be replaced.</td></tr>
+<tr><td><code>--verify-peer</code></td><td>Off; flag takes no value</td><td>
+Enables both certificate-chain validation (<code>SSL_VERIFYPEER=1</code>) and
+hostname validation (<code>SSL_VERIFYHOST=2</code>). Off matches the supplied
+incident configuration, but is unsafe for ordinary HTTPS traffic. Recommended
+for public endpoints. Do not write <code>--verify-peer true</code>.</td></tr>
+<tr><td><code>--verbose</code></td><td>Off; flag takes no value</td><td>Sets
+<code>CURLOPT_VERBOSE=1</code>. Libcurl writes diagnostic output to stderr,
+separate from application events on stdout. Useful for DNS/connect/TLS details;
+may expose URLs and headers.</td></tr>
+<tr><td><code>--help</code></td><td>No value</td><td>Prints usage and exits
+0 without curl initialization or a worker. Help displays [--url URL], but the
+actual parser requires a URL for a run.</td></tr>
+</tbody></table>
+</div>
+<div class="notice warning">Timeout settings are different layers:
+<strong>curl total/connect timeouts</strong>, <strong>callback start/stall
+checks</strong>, and <strong>glibc retries in /etc/resolv.conf</strong>.
+None of the probe arguments changes resolv.conf or blocks ARP/DNS.</div>
+</section>
+
+<section id="threads">
+<h2>3. Two application threads</h2>
+<div class="lanes">
+<article class="lane"><h3>Caller: main()</h3><ol>
+<li>Parse arguments; initialize libcurl globally before starting the worker.</li>
+<li>Log the runtime version, AsynchDNS feature, c-ares version and selected settings.</li>
+<li>Create <code>std::thread worker(download, std::ref(state))</code>.
+State is shared by reference and remains alive until join completes.</li>
+<li>If a stop delay is given, wait on doneCondition. If the worker finishes,
+log completed_before_release. Otherwise log release_requested and set active=false.</li>
+<li>Log join_begin and wait in <code>worker.join()</code>. There is no timed join.</li>
+<li>Log join_end, clean up libcurl globally and return the worker result.</li>
+</ol></article>
+<article class="lane worker"><h3>Worker: download()</h3><ol>
+<li>Create one CURL easy handle and the optional custom header list.</li>
+<li>Apply curl options and point callback userdata at shared State.</li>
+<li>Reset per-attempt byte/timing fields and call curl_easy_perform synchronously.</li>
+<li>Curl invokes receive/header/progress callbacks on this worker's request path.
+A threaded DNS backend may create an additional internal resolver thread.</li>
+<li>When curl returns, log result and getinfo timings, then decide whether to retry.</li>
+<li>Clean up the easy handle and header list, publish done=true and notify the caller.</li>
+</ol></article>
+</div>
+<pre>Possible delayed stop:
+Caller joins worker
+  Worker remains in curl_easy_perform / internal resolver cleanup
+    Internal DNS thread remains in getaddrinfo
+
+active=false requests cancellation; it does not forcibly stop that DNS thread.</pre>
+<p>Without a stop delay, join_begin may precede perform_begin because the caller
+and worker are scheduled independently. That ordering is normal, not evidence
+of deadlock. The stack-local State is not destroyed while the worker uses it.</p>
+</section>
+
+<section id="functions">
+<h2>4. Functions and shared state</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Code</th><th>Responsibility</th></tr></thead><tbody>
+<tr><td><code>Config</code></td><td>Stores CLI settings, defaults, URL, proxy and header values.</td></tr>
+<tr><td><code>State</code></td><td>Shared request state: config; monotonic origin;
+attempt start and last body update; active cancellation flag; byte count;
+completion condition and result.</td></tr>
+<tr><td><code>milliseconds()</code></td><td>Converts time since a steady_clock
+timestamp to milliseconds. It is elapsed time, not a UTC date.</td></tr>
+<tr><td><code>event()</code></td><td>Locks logMutex so application log lines
+from caller/worker do not interleave; prints elapsed_ms and flushes stdout.</td></tr>
+<tr><td><code>number()</code></td><td>Parses an integer using stol, rejects
+unconsumed characters and out-of-range values. Parsing exceptions become exit 2.</td></tr>
+<tr><td><code>arguments()</code></td><td>Maps CLI options to Config; requires a URL.</td></tr>
+<tr><td><code>receive()</code></td><td>Body callback: computes size * count,
+increments bytes, updates the last-data timestamp and discards content. Returns
+the consumed byte count to curl.</td></tr>
+<tr><td><code>receiveHeader()</code></td><td>Header callback: discards header
+content and returns size * count. It does not update body stall timing.</td></tr>
+<tr><td><code>progress()</code></td><td>Checks release flag first, then no-body
+start timeout, then post-body stall timeout. Returns 1 to abort, 0 to continue.
+The curl_off_t progress counters are intentionally unused.</td></tr>
+<tr><td><code>option()</code></td><td>Wraps curl_easy_setopt. A configuration
+failure throws rather than silently continuing; worker logs event=error.</td></tr>
+<tr><td><code>download()</code></td><td>Owns curl handle/header list, attempts,
+retry policy, result metrics and worker cleanup.</td></tr>
+<tr><td><code>main()</code></td><td>Initializes the library, schedules optional
+stop, joins the worker and returns the process exit status.</td></tr>
+</tbody></table></div>
+<p><code>active</code> is atomic for cross-thread cancellation. doneMutex and
+doneCondition protect completion signaling. Worker-only fields such as bytes,
+updated and cancelled are not modified by the caller. The cancelled field
+suppresses repeated release_flag log messages; it is not the final curl status.</p>
+</section>
+
+<section id="curl">
+<h2>5. Fixed curl options and callback wiring</h2>
+<div class="table-wrap"><table><thead><tr><th>Option</th><th>Value / meaning</th></tr></thead><tbody>
+<tr><td><code>CURLOPT_HTTPGET</code></td><td>1: request body using HTTP GET, not POST or ping.</td></tr>
+<tr><td><code>CURLOPT_NOSIGNAL</code></td><td>1: libcurl avoids signal-based
+operations. Does not suppress all signals to the process, choose c-ares, or cancel DNS.</td></tr>
+<tr><td><code>CURLOPT_IPRESOLVE</code></td><td>WHATEVER: permits both IPv4 and
+IPv6 according to backend/platform behavior. Does not guarantee both queries every run.</td></tr>
+<tr><td><code>CURLOPT_FOLLOWLOCATION</code></td><td>1: follow HTTP redirects.
+Redirects may involve another host and additional DNS/connection work.</td></tr>
+<tr><td><code>CURLOPT_ACCEPT_ENCODING</code></td><td>Empty string: request
+all encodings supported by the library and enable automatic decoding.</td></tr>
+<tr><td><code>CURLOPT_PROXYAUTH</code></td><td>CURLAUTH_ANY: allow supported
+proxy authentication negotiation when using a proxy.</td></tr>
+<tr><td><code>CURLOPT_SSLVERSION</code></td><td>TLSv1_2: TLS 1.2 minimum,
+not a forced TLS-1.2-only maximum. Relevant only for TLS connections.</td></tr>
+<tr><td><code>CURLOPT_NOPROGRESS</code></td><td>0: enables progress callback processing.</td></tr>
+<tr><td><code>XFERINFOFUNCTION / XFERINFODATA</code></td><td>progress function
+and pointer to State. curl_off_t parameters match libcurl's callback ABI.</td></tr>
+<tr><td><code>WRITEFUNCTION / WRITEDATA</code></td><td>receive function and
+State pointer for response body accounting.</td></tr>
+<tr><td><code>HEADERFUNCTION / HEADERDATA</code></td><td>receiveHeader
+function and State pointer. Header content is not stored.</td></tr>
+</tbody></table></div>
+<p>The configurable curl options are covered in the argument table above.
+There is no CURLOPT_RESOLVE override, dedicated DNS-server option, multi API
+loop, or direct getaddrinfo call in this application. DNS is handled by libcurl
+and its configured backend.</p>
+</section>
+
+<section id="retry">
+<h2>6. Exactly when it retries</h2>
+<p>After every perform return, attempt is compared with the retry budget.
+With a budget N, up to N+1 attempts are possible for retry-worthy results.</p>
+<div class="table-wrap"><table><thead><tr><th>Result</th><th>Probe behavior</th></tr></thead><tbody>
+<tr><td>Curl OK, HTTP 2xx</td><td>Success, no retry, exit 0.</td></tr>
+<tr><td>Curl OK, HTTP 408</td><td>Ordinary retry budget; forced to 1 if set
+to zero. Sleep 50 ms before retry.</td></tr>
+<tr><td>Curl OK, HTTP 502</td><td>Uses --retry-502; sleep 1,000 ms before retry.</td></tr>
+<tr><td>Curl OK, other HTTP status at least 500</td><td>Uses --retries;
+sleep 50 ms before retry.</td></tr>
+<tr><td>Curl 28 / 7 / 55</td><td>Operation timeout / could not connect /
+send error: uses retry budget, no added retry sleep.</td></tr>
+<tr><td>Curl 6</td><td>Could not resolve host: no retry in this probe.</td></tr>
+<tr><td>Curl 42</td><td>Aborted by callback: no retry.</td></tr>
+<tr><td>Other curl errors or HTTP failures</td><td>No retry; exit 1.</td></tr>
+</tbody></table></div>
+<p>The active release flag is not checked independently at the retry-loop
+boundary. If curl returns a retry-worthy timeout after release, another attempt
+may start; its progress callback can then abort. This preserves the relevant
+AAMP-style retry behavior rather than adding a new cancellation guarantee.</p>
+<div class="notice">20 seconds is an attempt timeout, not an application
+deadline. Two attempts, DNS cleanup, HTTP retry waits and final handle cleanup
+can all increase total time. Do not infer getaddrinfo duration just from the budget.</div>
+</section>
+
+<section id="logs">
+<h2>7. Read the log events and timing fields</h2>
+<div class="table-wrap"><table><thead><tr><th>Event</th><th>Meaning</th></tr></thead><tbody>
+<tr><td><code>runtime</code></td><td>Actual libcurl version/features and
+selected total/connect/cache settings. AsynchDNS=yes alone does not distinguish
+threaded glibc resolution from c-ares; inspect c_ares and trace behavior.</td></tr>
+<tr><td><code>perform_begin</code></td><td>An attempt is about to enter
+curl_easy_perform, with attempt number.</td></tr>
+<tr><td><code>release_requested</code></td><td>Caller logs intent to stop,
+then clears active. The worker may not observe it immediately.</td></tr>
+<tr><td><code>progress_abort</code></td><td>Curl invoked the callback and
+it requests abort. reason is release_flag, start_timeout or stall_timeout.</td></tr>
+<tr><td><code>perform_return</code></td><td>The synchronous curl call has
+returned; metrics and curl/HTTP status are recorded.</td></tr>
+<tr><td><code>cleanup_begin</code></td><td>Worker is about to clean up the
+handle and header list. Cleanup time is outside perform wall_ms.</td></tr>
+<tr><td><code>worker_exit</code></td><td>Cleanup completed; worker is about
+to publish done and finish. Actual thread return occurs shortly afterward.</td></tr>
+<tr><td><code>completed_before_release</code></td><td>Worker finished before
+the scheduled cancellation; no release flag was set.</td></tr>
+<tr><td><code>join_begin / join_end</code></td><td>Caller enters/leaves
+join. wait_ms measures the wait starting just before join_begin logging.</td></tr>
+<tr><td><code>error</code></td><td>Worker exception, such as curl option
+setup/allocation failure; exit 2. Parser errors print to stderr before startup.</td></tr>
+</tbody></table></div>
+<ul>
+<li><code>elapsed_ms</code>: monotonic time from State construction, including
+argument parsing and global curl setup. Not UTC time.</li>
+<li><code>wall_ms</code>: measured around each curl attempt; includes internal
+work performed before curl_easy_perform returns. Includes a small logging overhead.</li>
+<li><code>namelookup_s</code>: CURLINFO_NAMELOOKUP_TIME, curl's completed
+name-lookup timing. Zero on a failed lookup does not prove DNS was instant.</li>
+<li><code>connect_s</code>: CURLINFO_CONNECT_TIME, cumulative time from request
+start until connection establishment, not a standalone TCP duration.</li>
+<li><code>curl_total_s</code>: CURLINFO_TOTAL_TIME reported by curl for the
+attempt. It need not equal the application's measured wall time.</li>
+<li><code>curl_code</code>: CURLcode, separate from HTTP status.
+<code>http=0</code> commonly means no HTTP response was obtained.</li>
+</ul>
+<pre>Illustrative delayed-cancellation example (not a new measurement):
+elapsed_ms=1000  event=release_requested
+elapsed_ms=1015  event=progress_abort reason=release_flag
+elapsed_ms=6145  event=perform_return ... curl_code=42
+elapsed_ms=6150  event=join_end ...
+
+Release-to-join = approximately 5150 ms.
+Callback-to-curl-return = approximately 5130 ms.
+Neither alone proves all that time was spent in getaddrinfo.</pre>
+<p>Use packet captures and strace to attribute the delay. Without cancellation,
+join wait includes normal transfer time. With cancellation, join wait starts
+after the caller requested release and is close to, but not exactly, total
+release-to-join latency. Compare elapsed_ms timestamps for that exact interval.</p>
+<h3>Process exit status</h3>
+<pre>0 = last attempt was curl OK and HTTP 2xx, or --help
+1 = last attempt failed HTTP/curl or was cancelled
+2 = argument/setup/worker exception failure</pre>
+<p>This probe evaluates HTTP responses: a successful file:// transfer has no
+HTTP 2xx status and therefore exits 1. Use HTTP/HTTPS for the intended test.</p>
+</section>
+
+<section id="resolver">
+<h2>8. Measure the actual getaddrinfo call</h2>
+<p>The optional <a href="resolver_trace.c">resolver_trace.c</a> wrapper is built
+as <code>/usr/local/lib/libresolver_trace.so</code>. Run inside the client:</p>
+<pre>LD_PRELOAD=/usr/local/lib/libresolver_trace.so curl-probe --url https://example.com/ --verify-peer --stop-after-ms 1000
+echo "probe_exit=$?"</pre>
+<p>It intercepts the dynamically linked getaddrinfo symbol and forwards the
+same arguments to the real implementation using RTLD_NEXT. It does not change
+DNS answers, timeout settings or AAMP-style curl options.</p>
+<div class="table-wrap"><table><thead><tr><th>Resolver field</th><th>Meaning</th></tr></thead><tbody>
+<tr><td><code>resolver_event=begin</code></td><td>Resolver entry; records
+hostname, service, tid, requested family and monotonic timestamp.</td></tr>
+<tr><td><code>resolver_event=end</code></td><td>Resolver returned; same tid,
+return timestamp, duration_ms, status and errno.</td></tr>
+<tr><td><code>tid</code></td><td>Linux thread ID; locate this thread in strace
+to inspect DNS socket operations and poll waits.</td></tr>
+<tr><td><code>duration_ms</code></td><td>Elapsed getaddrinfo time, including
+NSS and DNS processing, not just network packet time. Logging adds overhead.</td></tr>
+<tr><td><code>status</code></td><td>0 is success; nonzero is an EAI error,
+not a curl error. errno is relevant for EAI_SYSTEM only.</td></tr>
+<tr><td><code>monotonic_ms</code></td><td>Absolute CLOCK_MONOTONIC reading;
+not the same origin as the probe's relative elapsed_ms or strace wall timestamps.</td></tr>
+</tbody></table></div>
+<p>The healthy validation observed getaddrinfo returning successfully in
+624.8 ms. Curl was subsequently cancelled with code 42 after the one-second
+stop request. This is one lab measurement, not a device timeout guarantee.</p>
+<pre>strace -f -ttt -T -o /results/trace.txt -e trace=network,poll,ppoll,select,pselect6,futex env LD_PRELOAD=/usr/local/lib/libresolver_trace.so curl-probe --url https://example.com/ --verify-peer --stop-after-ms 1000</pre>
+<p>-T measures individual syscalls; -f follows resolver threads. Match the
+wrapper tid to DNS socket activity and poll calls. Other threads also poll.
+The wrapper logs to stderr and the probe logs to stdout; both can be saved
+separately as described in the <a href="README.md">README</a>.</p>
+<div class="notice">A begin without an end shows an outstanding call, not a
+complete measured duration. No events can indicate caching, a literal IP,
+c-ares or another non-intercepted path. LD_PRELOAD tracing requires dynamic
+linking and is observational, with some timing overhead.</div>
+</section>
+
+<section id="limits">
+<h2>9. What this test does not establish</h2>
+<ul>
+<li>The probe alone measures curl; the optional wrapper measures intercepted
+getaddrinfo calls. strace is needed to attribute individual DNS poll waits.</li>
+<li>No automatic edits to resolv.conf, ARP blocking, DNS blocking or WPE crash recovery.</li>
+<li>No complete AAMP object lifecycle, manifest refresh/parsing, two MPD
+downloaders, notifier thread, DRM or media pipeline.</li>
+<li>No guarantee that Ubuntu's libcurl behaves like the device's vendor build.</li>
+<li>No permanent fix is implemented; this application reproduces and measures
+the relevant execution pattern.</li>
+</ul>
+<p>For resolver changes, packet capture commands and restoration, use the
+<a href="README.md">current README</a>. Review the implementation directly in
+<a href="curl_probe.cpp">curl_probe.cpp</a>, or the single-container setup in
+<a href="compose.yaml">compose.yaml</a>.</p>
+</section>
+<footer>Source-grounded walkthrough of the current standalone probe.
+No network fault commands execute from this page.</footer>
+</main>
+</body>
+</html>
